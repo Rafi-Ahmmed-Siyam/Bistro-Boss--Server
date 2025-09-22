@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const app = express();
 const cors = require('cors');
+const stripe = require('stripe')(process.env.STRIPE_SECRET);
 const jwt = require('jsonwebtoken');
 const port = process.env.PORT || 9000;
 
@@ -38,6 +39,9 @@ async function run() {
       const cartCollection = client
          .db('BistroBoss_Collection')
          .collection('carts');
+      const paymentsCollection = client
+         .db('BistroBoss_Collection')
+         .collection('payments');
 
       // Custom Middlewares
       const verifyToken = (req, res, next) => {
@@ -75,7 +79,7 @@ async function run() {
 
       const verifyAdmin = async (req, res, next) => {
          const emailByJwt = req?.userInfoJwt?.email;
-         // console.log('veryfy email', emailByJwt);
+         // console.log('verify email', emailByJwt);
          const query = { userEmail: emailByJwt };
          const user = await userCollection.findOne(query);
          const isAdmin = user?.role === 'admin';
@@ -120,7 +124,6 @@ async function run() {
          }
       );
 
-      // TODO: Admin Check
       // Get user data
       app.get('/users', verifyToken, verifyAdmin, async (req, res) => {
          // console.log(req.headers.authorization);
@@ -142,7 +145,6 @@ async function run() {
          res.send(result);
       });
 
-      // TODO: Admin Check
       // Delete user
       app.delete('/users/:id', verifyToken, verifyAdmin, async (req, res) => {
          const id = req.params.id;
@@ -152,7 +154,6 @@ async function run() {
          res.send(result);
       });
 
-      // TODO: Admin Check
       // Set a user as an Admin
       app.patch(
          '/users/admin/:id',
@@ -180,13 +181,101 @@ async function run() {
          res.send(result);
       });
 
+      // Get a item data
+      app.get('/menu/:id', async (req, res) => {
+         const id = req.params.id;
+         const query = { _id: new ObjectId(id) };
+         const result = await menuCollection.findOne(query);
+         res.send(result);
+      });
+
+      // Add menu in menu Collection
+      app.post('/menu', verifyToken, verifyAdmin, async (req, res) => {
+         const menuItem = req.body;
+         // console.log(menuItem);
+         const result = await menuCollection.insertOne(menuItem);
+         res.send(result);
+      });
+
+      // Update a menu item
+      app.patch('/menu/:id', verifyToken, verifyAdmin, async (req, res) => {
+         const id = req.params.id;
+         const updatedData = req.body;
+         console.log(id, updatedData);
+         const filter = { _id: new ObjectId(id) };
+         const updatedDoc = {
+            $set: updatedData,
+         };
+         const result = await menuCollection.updateOne(filter, updatedDoc);
+         res.send(result);
+      });
+
+      // Delete a menu item
+      app.delete('/menu/:id', verifyToken, verifyAdmin, async (req, res) => {
+         const id = req.params.id;
+         const query = { _id: new ObjectId(id) };
+         const result = await menuCollection.deleteOne(query);
+         res.send(result);
+      });
+
       // Get all reviews data
       app.get('/reviews', async (req, res) => {
          const result = await reviewCollection.find().toArray();
          res.send(result);
       });
 
-      //Add cart data
+      //Cart Related APIs----------------------->
+      // Payment  PaymentIntent------------->
+      app.post('/create/create-payment-intent', async (req, res) => {
+         const { price } = req.body;
+         const amount = parseInt(price * 100);
+         // console.log('price', price);
+         // console.log('amount', amount);
+
+         const paymentIntent = await stripe.paymentIntents.create({
+            amount: amount,
+            currency: 'usd',
+            payment_method_types: ['card', 'link'],
+         });
+
+         res.send({ clientSecret: paymentIntent.client_secret });
+      });
+
+      // Add payment data in database and delete user cart data from card collection
+      app.post('/payments', async (req, res) => {
+         const paymentData = req.body;
+         // console.log(paymentData);
+         const paymentResult = await paymentsCollection.insertOne(paymentData);
+
+         // carefully delete items in card collection
+         const query = {
+            _id: {
+               $in: paymentData.cartId.map((id) => new ObjectId(id)),
+            },
+         };
+
+         const deleteResult = await cartCollection.deleteMany(query);
+
+         res.send({ paymentResult, deleteResult });
+      });
+
+      // Get payment data
+      app.get(
+         '/payments/:email',
+         verifyToken,
+         verifyEmail,
+         async (req, res) => {
+            const email = req.params.email;
+            const query = { email: email };
+            const options = { sort: { data: -1 } };
+            const result = await paymentsCollection
+               .find(query, options)
+               .toArray();
+            res.send(result);
+         }
+      );
+
+      // Add to user cart data
       app.post('/carts', verifyToken, verifyEmail, async (req, res) => {
          const cartItem = req.body;
          const { menuId, email } = cartItem;
@@ -255,8 +344,8 @@ async function run() {
          res.send(result);
       });
 
-      // Read data by food Category
-      app.get('/menu/:category', async (req, res) => {
+      // Read data by food Category------->{Pagination}
+      app.get('/menu/category/:category', async (req, res) => {
          const category = req.params.category;
          const page = parseInt(req.query.page);
          const limit = parseInt(req.query.limit);
