@@ -280,19 +280,19 @@ async function run() {
          const cartItem = req.body;
          const { menuId, email } = cartItem;
 
-         const isExist = await cartCollection.findOne({ menuId, email });
-         if (isExist) {
-            let menuId = cartItem?.menuId;
-            let email = cartItem?.email;
-            const filter = { menuId, email };
-            const update = {
-               $inc: { quantity: 1 },
-            };
-            const updateResult = await cartCollection.updateOne(filter, update);
-            return res
-               .status(200)
-               .send({ updateResult, message: 'Quantity updated!' });
-         }
+         // const isExist = await cartCollection.findOne({ menuId, email });
+         // if (isExist) {
+         //    let menuId = cartItem?.menuId;
+         //    let email = cartItem?.email;
+         //    const filter = { menuId, email };
+         //    const update = {
+         //       $inc: { quantity: 1 },
+         //    };
+         //    const updateResult = await cartCollection.updateOne(filter, update);
+         //    return res
+         //       .status(200)
+         //       .send({ updateResult, message: 'Quantity updated!' });
+         // }
 
          const result = await cartCollection.insertOne(cartItem);
          res.status(201).send({ result, message: 'Item added to cart!' });
@@ -368,6 +368,79 @@ async function run() {
          const query = { category: category };
          const count = await menuCollection.countDocuments(query);
          res.send({ count });
+      });
+
+      // Stats or analytics for Admin
+      app.get('/admin-stats', verifyToken, verifyToken, async (req, res) => {
+         const users = await userCollection.estimatedDocumentCount();
+         const menuItems = await menuCollection.estimatedDocumentCount();
+         const orders = await paymentsCollection.estimatedDocumentCount();
+
+         // This is not the best way
+         // const payment = await paymentsCollection.find().toArray();
+         // const revenue = payment.reduce(
+         //    (total, payment) => total + payment.price,
+         //    0
+         // );
+
+         // Best Way
+         const result = await paymentsCollection
+            .aggregate([
+               {
+                  $group: {
+                     _id: null,
+                     totalRevenue: { $sum: '$price' },
+                  },
+               },
+            ])
+            .toArray();
+         // console.log(result[0].totalRevenue);
+         const revenue = result[0]?.totalRevenue || 0;
+
+         res.send({ users, menuItems, orders, revenue });
+      });
+
+      // Order and category stats
+      app.get('/order-stats', verifyToken, verifyToken, async (req, res) => {
+         const result = await paymentsCollection
+            .aggregate([
+               {
+                  $unwind: '$menuItemId',
+               },
+               {
+                  $lookup: {
+                     from: 'menu',
+                     localField: 'menuItemId',
+                     foreignField: '_id',
+                     as: 'menuItem',
+                  },
+               },
+               {
+                  $unwind: '$menuItem',
+               },
+               {
+                  $group: {
+                     _id: '$menuItem.category',
+                     quantity: {
+                        $sum: 1,
+                     },
+                     totalRevenue: {
+                        $sum: '$menuItem.price',
+                     },
+                  },
+               },
+               {
+                  $project: {
+                     _id: 0,
+                     category: '$_id',
+                     quantity: '$quantity',
+                     revenue: '$totalRevenue',
+                  },
+               },
+            ])
+            .toArray();
+
+         res.send(result);
       });
 
       // await client.connect();
