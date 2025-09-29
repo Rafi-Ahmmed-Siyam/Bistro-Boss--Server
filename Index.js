@@ -4,18 +4,23 @@ const app = express();
 const cors = require('cors');
 const stripe = require('stripe')(process.env.STRIPE_SECRET);
 const jwt = require('jsonwebtoken');
-const port = process.env.PORT || 9000;
+const port = process.env.PORT || 8000;
 
 // Middlewares
-app.use(express.json());
 app.use(
    cors({
-      origin: ['http://localhost:3000', 'http://192.168.0.102:3000'],
+      origin: [
+         'http://localhost:3000',
+         'https://vercel.com/rafi-ahmmeds-projects/bistro-boss-client/7ivCR7ViuvJonKg2f2xyVoesPB2r',
+         'https://bistro-boss-client-levu62g5h-rafi-ahmmeds-projects.vercel.app',
+         'https://bistro-boss-client-gamma.vercel.app',
+      ],
    })
 );
+app.use(express.json());
 
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
-const req = require('express/lib/request');
+// const req = require('express/lib/request');
 const uri = `mongodb+srv://${process.env.DB_NAME}:${process.env.DB_PASS}@cluster0.wsg3r.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
 // Create a MongoClient with a MongoClientOptions object to set the Stable API version
 const client = new MongoClient(uri, {
@@ -275,6 +280,8 @@ async function run() {
          }
       );
 
+      // TODO: Get All payments data for admin panel
+
       // Add to user cart data
       app.post('/carts', verifyToken, verifyEmail, async (req, res) => {
          const cartItem = req.body;
@@ -401,11 +408,16 @@ async function run() {
       });
 
       // Order and category stats
-      app.get('/order-stats', verifyToken, verifyToken, async (req, res) => {
+      app.get('/order-stats', async (req, res) => {
          const result = await paymentsCollection
             .aggregate([
                {
                   $unwind: '$menuItemId',
+               },
+               {
+                  $addFields: {
+                     menuItemId: { $toObjectId: '$menuItemId' },
+                  },
                },
                {
                   $lookup: {
@@ -417,6 +429,13 @@ async function run() {
                },
                {
                   $unwind: '$menuItem',
+               },
+               {
+                  $match: {
+                     'menuItem.category': {
+                        $in: ['dessert', 'drinks', 'salad', 'pizza', 'soup'],
+                     },
+                  },
                },
                {
                   $group: {
