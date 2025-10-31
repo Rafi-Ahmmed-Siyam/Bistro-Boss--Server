@@ -2,8 +2,10 @@ require('dotenv').config();
 const express = require('express');
 const app = express();
 const cors = require('cors');
+const morgan = require('morgan');
 const stripe = require('stripe')(process.env.STRIPE_SECRET);
 const jwt = require('jsonwebtoken');
+const axios = require('axios');
 const port = process.env.PORT || 8000;
 
 // Middlewares
@@ -17,7 +19,9 @@ app.use(
       ],
    })
 );
+app.use(express.urlencoded());
 app.use(express.json());
+app.use(morgan('dev'));
 
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 // const req = require('express/lib/request');
@@ -229,8 +233,8 @@ async function run() {
          res.send(result);
       });
 
-      //Cart Related APIs----------------------->
-      // Payment  PaymentIntent------------->
+      //Cart and Payment Related APIs----------------------->
+      // Payment  PaymentIntent STRIPE------------->
       app.post('/create/create-payment-intent', async (req, res) => {
          const { price } = req.body;
          const amount = parseInt(price * 100);
@@ -246,7 +250,137 @@ async function run() {
          res.send({ clientSecret: paymentIntent.client_secret });
       });
 
+      // SSLCOMMERZ Payment ------------>
+      app.post('/create-ssl-payment', verifyToken, async (req, res) => {
+         const payment = req.body;
+         const menuItemIds = payment.menuItemIds;
+
+         // find menu data for get total price
+         const items = await menuCollection
+            .find({
+               _id: { $in: menuItemIds.map((id) => new ObjectId(id)) },
+            })
+            .toArray();
+         const totalPrice = items.reduce((sum, item) => sum + item.price, 0);
+
+         // Create transaction id
+         const transactionId = new ObjectId().toString();
+
+         // Create payment initiate
+         const initiate = {
+            store_id: process.env.SSL_STORE_ID,
+            store_passwd: process.env.SSL_STORE_PASS,
+            total_amount: totalPrice,
+            currency: 'BDT',
+            tran_id: transactionId,
+            success_url: `${process.env.SERVER_URL}/payment-success`,
+            fail_url: `${process.env.SERVER_URL}/payment-failed`,
+            cancel_url: `${process.env.SERVER_URL}/payment-cancel`,
+            ipn_url: 'http://localhost:3000/ipn',
+            shipping_method: 'Courier',
+            product_name: 'Computer.',
+            product_category: 'Food',
+            product_profile: 'general',
+            cus_name: 'anonymous',
+            cus_email: payment?.email || 'anonymous',
+            cus_add1: 'Dhaka',
+            cus_add2: 'Dhaka',
+            cus_city: 'Dhaka',
+            cus_state: 'Dhaka',
+            cus_postcode: '1000',
+            cus_country: 'Bangladesh',
+            cus_phone: '01711111111',
+            cus_fax: '01711111111',
+            ship_name: 'Customer Name',
+            ship_add1: 'Dhaka',
+            ship_add2: 'Dhaka',
+            ship_city: 'Dhaka',
+            ship_state: 'Dhaka',
+            ship_postcode: 1000,
+            ship_country: 'Bangladesh',
+         };
+         // Sent a post req in SSLCOMMARZ
+         const inResponse = await axios({
+            url: 'https://sandbox.sslcommerz.com/gwprocess/v4/api.php',
+            method: 'POST',
+            data: initiate,
+            headers: {
+               'Content-Type': 'application/x-www-form-urlencoded',
+            },
+         });
+         // Save payment data in data base and status=pending
+         const insResult = await paymentsCollection.insertOne({
+            ...payment,
+            totalPrice,
+            transactionId,
+         });
+         const gatewayPageURL = inResponse?.data?.GatewayPageURL;
+         res.send({ gatewayPageURL });
+      });
+
+      // handle Payment Success URL and ensure is the payment is successfully done
+      app.post('/payment-success', async (req, res) => {
+         const paymentSuccess = req.body;
+         console.log(paymentSuccess);
+         // get req for ensure payment success
+         const { data } = await axios.get(
+            `https://sandbox.sslcommerz.com/validator/api/validationserverAPI.php?val_id=${paymentSuccess?.val_id}&store_id=${process.env.SSL_STORE_ID}&store_passwd=${process.env.SSL_STORE_PASS}&format=json`
+         );
+
+         // Validate payment ispaid
+         console.log(data);
+         if (data.status !== 'VALID') {
+            return res.send({ message: 'Invalid Payment' });
+         }
+
+         // Update payment status in database
+         const updatePayment = await paymentsCollection.updateOne(
+            {
+               transactionId: data.tran_id,
+            },
+            {
+               $set: {
+                  status: 'success',
+               },
+            }
+         );
+
+         // Delete cart data
+         const cartData = await paymentsCollection.findOne({
+            transactionId: data.tran_id,
+         });
+         const query = {
+            _id: {
+               $in: cartData.cartIds.map((id) => new ObjectId(id)),
+            },
+         };
+         const deleteResult = await cartCollection.deleteMany(query);
+         console.log(deleteResult);
+         // after validate redirect to the another page
+         res.redirect(
+            `${process.env.CLIENT_URL}/dashboard/paymentHistory?status=success`
+         );
+         console.log(updatePayment);
+      });
+
+      // handle payment failed
+      app.post('/payment-failed', async (req, res) => {
+         const paymentFailed = req.body;
+         res.redirect(
+            `${process.env.CLIENT_URL}/dashboard/payment?status=failed`
+         );
+      });
+
+      // handle payment cancel
+      app.post('/payment-cancel', async (req, res) => {
+         const paymentFailed = req.body;
+         res.redirect(
+            `${process.env.CLIENT_URL}/dashboard/payment?status=cancel`
+         );
+      });
+
       // Add payment data in database and delete user cart data from card collection
+      // aND ALSO SEND EMAIL WHO CONFIRM PAYMENT
       app.post('/payments', async (req, res) => {
          const paymentData = req.body;
          // console.log(paymentData);
@@ -258,7 +392,6 @@ async function run() {
                $in: paymentData.cartId.map((id) => new ObjectId(id)),
             },
          };
-
          const deleteResult = await cartCollection.deleteMany(query);
 
          res.send({ paymentResult, deleteResult });
@@ -371,7 +504,6 @@ async function run() {
       // get menu total count
       app.get('/totalMenuCount/:category', async (req, res) => {
          const category = req.params.category;
-
          const query = { category: category };
          const count = await menuCollection.countDocuments(query);
          res.send({ count });
